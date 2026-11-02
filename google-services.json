@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "560400190590",
+    "project_id": "voterpath-01",
+    "storage_bucket": "voterpath-01.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:560400190590:android:c11c6ec89bbac7a2159c2f",
+        "android_client_info": {
+          "package_name": "com.voterpath.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC0M4g9Vzsrfb8IV1Cqp8Y0zot8t7TOR4A"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

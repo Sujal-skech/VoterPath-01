@@ -1,0 +1,280 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // This security rules file assumes the following data structures:
+    //
+    // Collection: elections
+    // Document ID: {electionId} (e.g., 'gen-2026', 'pri-2026', 'mun-2026')
+    // Fields:
+    //   - id: string (required, 1-64 chars, matches document ID, immutable)
+    //   - title: string (required, 1-150 chars)
+    //   - electionDate: string (required, date format YYYY-MM-DD, 10-35 chars)
+    //   - type: string (required, enum: 'General Election', 'Primary Election', 'Local Election', 'Special Election')
+    //   - description: string (required, 1-1000 chars)
+    //   - registrationDeadline: string (required, date format YYYY-MM-DD, 10-35 chars)
+    //   - absenteeBallotDeadline: string (required, date format YYYY-MM-DD, 10-35 chars)
+    //   - earlyVotingStart: string (optional, date format YYYY-MM-DD, 10-35 chars)
+    //   - earlyVotingEnd: string (optional, date format YYYY-MM-DD, 10-35 chars)
+    //
+    // Collection: candidates
+    // Document ID: {candidateId} (e.g., 'cand-1', 'cand-2')
+    // Fields:
+    //   - id: string (required, 1-64 chars, matches document ID, immutable)
+    //   - name: string (required, 1-100 chars)
+    //   - party: string (required, enum: 'Democratic', 'Republican', 'Independent', 'Green', 'Libertarian', 'Non-Partisan')
+    //   - office: string (required, 1-100 chars)
+    //   - district: string (optional, 1-100 chars)
+    //   - bio: string (required, 1-2000 chars)
+    //   - imageUrl: string (optional, valid HTTP/HTTPS URL, <= 500 chars)
+    //   - keyIssues: list of maps (required, max 20 items)
+    //   - website: string (optional, valid HTTP/HTTPS URL, <= 500 chars)
+    //   - experience: list of strings (optional, max 20 items)
+    //
+    // Collection: polling_locations
+    // Document ID: {locationId} (e.g., 'poll-1', 'poll-2')
+    // Fields:
+    //   - id: string (required, 1-64 chars, matches document ID, immutable)
+    //   - name: string (required, 1-150 chars)
+    //   - address: string (required, 1-200 chars)
+    //   - city: string (required, 1-100 chars)
+    //   - state: string (required, 2-50 chars)
+    //   - zip: string (required, 5-15 chars)
+    //   - hours: string (required, 1-100 chars)
+    //   - isEarlyVoting: bool (required)
+    //   - isDropBox: bool (required)
+    //   - wheelchairAccessible: bool (required)
+    //   - phone: string (optional, 7-30 chars)
+    //   - notes: string (optional, 1-500 chars)
+    //
+    // Collection: voter_guides
+    // Document ID: {guideId} (e.g., 'guide-1', 'guide-2')
+    // Fields:
+    //   - id: string (required, 1-64 chars, matches document ID, immutable)
+    //   - title: string (required, 1-150 chars)
+    //   - category: string (required, enum: 'Registration', 'ID Requirements', 'Mail-in & Absentee', 'Election Day')
+    //   - icon: string (required, 1-100 chars)
+    //   - summary: string (required, 1-500 chars)
+    //   - steps: list of maps (required, max 20 items)
+    //   - faqs: list of maps (required, max 30 items)
+    //
+    // Collection: users
+    // Document ID: {userId} (matches Firebase Auth UID)
+    // Fields:
+    //   - savedCandidateIds: list of strings (required, max 100 items)
+    //   - savedLocationIds: list of strings (required, max 100 items)
+    //   - reminderEventIds: list of strings (required, max 100 items)
+    //   - email: string (optional, valid email format, <= 100 chars)
+    //   - createdAt: string or timestamp (optional, immutable once written)
+    //   - updatedAt: string or timestamp (optional)
+    //
+    // ===============================================================
+
+    // Default Deny All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.get('admin', false) == true ||
+        request.auth.token.get('role', '') == 'admin' ||
+        request.auth.token.get('email', '') == 'admin@voterpath.org' ||
+        (request.auth.token.get('email_verified', false) == true &&
+         request.auth.token.get('email', '').matches('^admin@.*|^.*@voterpath\\.org$'))
+      );
+    }
+
+    function isValidUrl(url) {
+      return url is string &&
+        (url.matches('^https://.*') || url.matches('^http://.*'));
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // Official Initial Seed Document ID verifiers
+    function isInitialSeedElection(id) {
+      return id in ['gen-2026', 'pri-2026', 'mun-2026'];
+    }
+
+    function isInitialSeedCandidate(id) {
+      return id in ['cand-1', 'cand-2', 'cand-3', 'cand-4'];
+    }
+
+    function isInitialSeedLocation(id) {
+      return id in ['poll-1', 'poll-2', 'poll-3', 'poll-4'];
+    }
+
+    function isInitialSeedGuide(id) {
+      return id in ['guide-1', 'guide-2', 'guide-3', 'guide-4'];
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    // Validator for Election Documents
+    function isValidElection(electionId, data) {
+      return data.keys().hasAll(['id', 'title', 'electionDate', 'type', 'description', 'registrationDeadline', 'absenteeBallotDeadline']) &&
+        data.keys().hasOnly(['id', 'title', 'electionDate', 'type', 'description', 'registrationDeadline', 'absenteeBallotDeadline', 'earlyVotingStart', 'earlyVotingEnd']) &&
+        data.id is string && data.id == electionId && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
+        data.electionDate is string && data.electionDate.matches('^\\d{4}-\\d{2}-\\d{2}(T.*)?$') && data.electionDate.size() <= 35 &&
+        data.type is string && data.type in ['General Election', 'Primary Election', 'Local Election', 'Special Election'] &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 1000 &&
+        data.registrationDeadline is string && data.registrationDeadline.matches('^\\d{4}-\\d{2}-\\d{2}(T.*)?$') && data.registrationDeadline.size() <= 35 &&
+        data.absenteeBallotDeadline is string && data.absenteeBallotDeadline.matches('^\\d{4}-\\d{2}-\\d{2}(T.*)?$') && data.absenteeBallotDeadline.size() <= 35 &&
+        (!('earlyVotingStart' in data) || (data.earlyVotingStart is string && data.earlyVotingStart.matches('^\\d{4}-\\d{2}-\\d{2}(T.*)?$') && data.earlyVotingStart.size() <= 35)) &&
+        (!('earlyVotingEnd' in data) || (data.earlyVotingEnd is string && data.earlyVotingEnd.matches('^\\d{4}-\\d{2}-\\d{2}(T.*)?$') && data.earlyVotingEnd.size() <= 35));
+    }
+
+    // Validator for Candidate Documents
+    function isValidCandidate(candidateId, data) {
+      return data.keys().hasAll(['id', 'name', 'party', 'office', 'bio', 'keyIssues']) &&
+        data.keys().hasOnly(['id', 'name', 'party', 'office', 'district', 'bio', 'imageUrl', 'keyIssues', 'website', 'experience']) &&
+        data.id is string && data.id == candidateId && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.party is string && data.party in ['Democratic', 'Republican', 'Independent', 'Green', 'Libertarian', 'Non-Partisan'] &&
+        data.office is string && data.office.size() > 0 && data.office.size() <= 100 &&
+        (!('district' in data) || (data.district is string && data.district.size() > 0 && data.district.size() <= 100)) &&
+        data.bio is string && data.bio.size() > 0 && data.bio.size() <= 2000 &&
+        (!('imageUrl' in data) || (isValidUrl(data.imageUrl) && data.imageUrl.size() <= 500)) &&
+        data.keyIssues is list && data.keyIssues.size() <= 20 &&
+        (!('website' in data) || (isValidUrl(data.website) && data.website.size() <= 500)) &&
+        (!('experience' in data) || (data.experience is list && data.experience.size() <= 20));
+    }
+
+    // Validator for Polling Location Documents
+    function isValidPollingLocation(locationId, data) {
+      return data.keys().hasAll(['id', 'name', 'address', 'city', 'state', 'zip', 'hours', 'isEarlyVoting', 'isDropBox', 'wheelchairAccessible']) &&
+        data.keys().hasOnly(['id', 'name', 'address', 'city', 'state', 'zip', 'hours', 'isEarlyVoting', 'isDropBox', 'wheelchairAccessible', 'phone', 'notes']) &&
+        data.id is string && data.id == locationId && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+        data.address is string && data.address.size() > 0 && data.address.size() <= 200 &&
+        data.city is string && data.city.size() > 0 && data.city.size() <= 100 &&
+        data.state is string && data.state.size() >= 2 && data.state.size() <= 50 &&
+        data.zip is string && data.zip.size() >= 5 && data.zip.size() <= 15 &&
+        data.hours is string && data.hours.size() > 0 && data.hours.size() <= 100 &&
+        data.isEarlyVoting is bool &&
+        data.isDropBox is bool &&
+        data.wheelchairAccessible is bool &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() >= 7 && data.phone.size() <= 30)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() > 0 && data.notes.size() <= 500));
+    }
+
+    // Validator for Voter Guide Documents
+    function isValidVoterGuide(guideId, data) {
+      return data.keys().hasAll(['id', 'title', 'category', 'icon', 'summary', 'steps', 'faqs']) &&
+        data.keys().hasOnly(['id', 'title', 'category', 'icon', 'summary', 'steps', 'faqs']) &&
+        data.id is string && data.id == guideId && data.id.size() > 0 && data.id.size() <= 64 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
+        data.category is string && data.category in ['Registration', 'ID Requirements', 'Mail-in & Absentee', 'Election Day'] &&
+        data.icon is string && data.icon.size() > 0 && data.icon.size() <= 100 &&
+        data.summary is string && data.summary.size() > 0 && data.summary.size() <= 500 &&
+        data.steps is list && data.steps.size() <= 20 &&
+        data.faqs is list && data.faqs.size() <= 30;
+    }
+
+    // Validator for User Preferences Document
+    function isValidUserPreferences(data) {
+      return data.keys().hasAll(['savedCandidateIds', 'savedLocationIds', 'reminderEventIds']) &&
+        data.keys().hasOnly(['savedCandidateIds', 'savedLocationIds', 'reminderEventIds', 'email', 'createdAt', 'updatedAt']) &&
+        data.savedCandidateIds is list && data.savedCandidateIds.size() <= 100 &&
+        data.savedLocationIds is list && data.savedLocationIds.size() <= 100 &&
+        data.reminderEventIds is list && data.reminderEventIds.size() <= 100 &&
+        (!('email' in data) || (isValidEmail(data.email) && data.email.size() <= 100)) &&
+        (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50) || data.updatedAt is timestamp);
+    }
+
+    // ===============================================================
+    // Collection Match Rules
+    // ===============================================================
+
+    // 1. Elections Collection
+    // Public read for all users (authenticated and unauthenticated)
+    // Write allowed for admin or initial seed
+    match /elections/{electionId} {
+      allow read: if true;
+      allow create: if (isAdmin() || isInitialSeedElection(electionId)) &&
+                       isValidElection(electionId, request.resource.data);
+      allow update: if isAdmin() &&
+                       request.resource.data.id == resource.data.id &&
+                       isValidElection(electionId, request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // 2. Candidates Collection
+    // Public read for all users
+    // Write allowed for admin or initial seed
+    match /candidates/{candidateId} {
+      allow read: if true;
+      allow create: if (isAdmin() || isInitialSeedCandidate(candidateId)) &&
+                       isValidCandidate(candidateId, request.resource.data);
+      allow update: if isAdmin() &&
+                       request.resource.data.id == resource.data.id &&
+                       isValidCandidate(candidateId, request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // 3. Polling Locations Collection
+    // Public read for all users
+    // Write allowed for admin or initial seed
+    match /polling_locations/{locationId} {
+      allow read: if true;
+      allow create: if (isAdmin() || isInitialSeedLocation(locationId)) &&
+                       isValidPollingLocation(locationId, request.resource.data);
+      allow update: if isAdmin() &&
+                       request.resource.data.id == resource.data.id &&
+                       isValidPollingLocation(locationId, request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // 4. Voter Guides Collection
+    // Public read for all users
+    // Write allowed for admin or initial seed
+    match /voter_guides/{guideId} {
+      allow read: if true;
+      allow create: if (isAdmin() || isInitialSeedGuide(guideId)) &&
+                       isValidVoterGuide(guideId, request.resource.data);
+      allow update: if isAdmin() &&
+                       request.resource.data.id == resource.data.id &&
+                       isValidVoterGuide(guideId, request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // 5. User Preferences Collection
+    // Private: Only the authenticated owner can read and write their preferences
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) &&
+                       isValidUserPreferences(request.resource.data);
+      allow update: if isOwner(userId) &&
+                       isValidUserPreferences(request.resource.data) &&
+                       (!('createdAt' in resource.data) ||
+                        ('createdAt' in request.resource.data &&
+                         request.resource.data.createdAt == resource.data.createdAt));
+      allow delete: if isOwner(userId);
+    }
+  }
+}
